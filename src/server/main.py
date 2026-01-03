@@ -10,6 +10,12 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from generator.generator import rag_chat, clear_chat_history
 from retriever.retriever import initialize_reranker
 import torch
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
 # ============================================
 # STARTUP: Load all models once at server start
@@ -18,7 +24,6 @@ import torch
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(dotenv_path=os.path.join(BASE_DIR, "../.env"))
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 if not PINECONE_API_KEY:
     raise ValueError("Please set the PINECONE_API_KEY in your .env file!")
 
