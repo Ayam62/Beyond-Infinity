@@ -1,11 +1,18 @@
 "use client";
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { Send, FileText, User, CheckCircle2, ExternalLink, Trash2, Mic, MicOff, Loader2 } from 'lucide-react';
+import { Send, FileText, User, CheckCircle2, ExternalLink, Trash2, Mic, MicOff, Loader2, MapPin } from 'lucide-react';
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import LoadingDots from '@/components/loadingDots';
-import hark from 'hark'; // Make sure to npm install hark
+import hark from 'hark';
+import dynamic from 'next/dynamic';
+
+// Dynamic import for Leaflet (Required for Next.js SSR)
+const OfficeMap = dynamic(() => import('@/components/OfficeMap'), { 
+  ssr: false,
+  loading: () => <div className="h-48 w-full bg-gray-100 animate-pulse rounded-lg flex items-center justify-center text-xs text-gray-400">Loading Map...</div>
+});
 
 export default function ChatPage() {
   const router = useRouter();
@@ -15,14 +22,16 @@ export default function ChatPage() {
       text: "नमस्ते! **सहज** मा स्वागत छ। म तपाईंलाई सरकारी कागजात प्रक्रियाहरूमा मद्दत गर्न यहाँ छु। तपाईं नेपाली वा अंग्रेजीमा प्रश्न सोध्न सक्नुहुन्छ।\n\nWelcome! I'm here to help you with government document procedures. You can ask in Nepali or English.",
       sender: 'bot',
       timestamp: new Date(),
-      sources: []
+      sources: [],
+      nearest_office: null // Added to initial state
     }
   ]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false); // New state for backend transcription delay
+  const [isTranscribing, setIsTranscribing] = useState(false);
   
-  // Voice & Silence Detection States
+  const [location, setLocation] = useState({ latitude: null, longitude: null });
+
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
@@ -39,6 +48,22 @@ export default function ChatPage() {
   useEffect(() => {
     scrollToBottom();
   }, [messages, isLoading]);
+
+  useEffect(() => {
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setLocation({
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+          });
+        },
+        (error) => {
+          console.error("Error obtaining location:", error);
+        }
+      );
+    }
+  }, []);
 
   useEffect(() => {
     const initialQuestion = sessionStorage.getItem('initialQuestion');
@@ -59,8 +84,6 @@ export default function ChatPage() {
     }
   };
 
-  // --- Automatic Voice Logic (Hark + Backend Transcribe) ---
-  
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -68,7 +91,6 @@ export default function ChatPage() {
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
-      // 1. Setup Hark for silence detection
       const speechEvents = hark(stream, { threshold: -50, interval: 100 });
       harkRef.current = speechEvents;
 
@@ -77,7 +99,6 @@ export default function ChatPage() {
       });
 
       speechEvents.on('stopped_speaking', () => {
-        // If silence lasts for 2 seconds, stop recording
         silenceTimerRef.current = setTimeout(() => {
           if (mediaRecorder.state !== "inactive") {
             stopRecording();
@@ -115,7 +136,6 @@ export default function ChatPage() {
   const handleTranscriptionOnly = async (audioBlob) => {
     setIsTranscribing(true);
     const formData = new FormData();
-    // Sending to the /transcribe endpoint we discussed earlier
     formData.append("file", audioBlob, "user_speech.webm");
 
     try {
@@ -129,7 +149,6 @@ export default function ChatPage() {
 
       if (data.transcribed_text) {
         setInputValue(data.transcribed_text);
-        // Briefly delay to allow state update before resizing
         setTimeout(adjustTextareaHeight, 100);
       }
     } catch (error) {
@@ -139,8 +158,7 @@ export default function ChatPage() {
     }
   };
 
-  // --- Existing Text Logic ---
-  const handleSendMessage = async (messageText?: string) => {
+  const handleSendMessage = async (messageText) => {
     const textToSend = messageText || inputValue.trim();
     if (textToSend === '' || isTranscribing) return;
 
@@ -164,7 +182,11 @@ export default function ChatPage() {
       const response = await fetch("http://127.0.0.1:8000/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: textToSend })
+        body: JSON.stringify({ 
+          message: textToSend,
+          latitude: location.latitude,
+          longitude: location.longitude 
+        })
       });
       const data = await response.json();
       setMessages(prev => [...prev, {
@@ -172,7 +194,8 @@ export default function ChatPage() {
         text: data.reply,
         sender: 'bot',
         timestamp: new Date(),
-        sources: data.sources || []
+        sources: data.sources || [],
+        nearest_office: data.nearest_office // Captured coordinates
       }]);
     } catch (error) {
       console.error("Chat error:", error);
@@ -237,6 +260,21 @@ export default function ChatPage() {
                   {message.sender === 'bot' ? (
                     <div className="prose prose-slate prose-sm max-w-none">
                       <Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
+                      
+                      {/* Map rendered inside bot message if coordinates exist */}
+                      {message.nearest_office && (
+                        <div className="mt-4 pt-4 border-t border-gray-100">
+                          <div className="flex items-center gap-2 mb-2 text-emerald-700 font-bold text-xs">
+                             <MapPin size={14} /> नजिकको कार्यालय (Nearest Office Map)
+                          </div>
+                          <OfficeMap 
+                            lat={message.nearest_office.latitude}
+                            lon={message.nearest_office.longitude}
+                            name={message.nearest_office.name}
+                            address={message.nearest_office.address}
+                          />
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div className="text-white whitespace-pre-wrap text-sm">{message.text}</div>
@@ -280,7 +318,6 @@ export default function ChatPage() {
                   style={{ minHeight: '48px', maxHeight: '160px', height: '48px', overflow: 'hidden' }}
                 />
                 
-                {/* Status Indicator inside Textarea */}
                 {isTranscribing && (
                   <div className="absolute right-14 bottom-3">
                     <Loader2 className="w-4 h-4 text-emerald-600 animate-spin" />

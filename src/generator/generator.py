@@ -6,7 +6,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from pinecone_text.sparse import BM25Encoder
 from retriever.retriever import retriever 
-from typing import List, Dict, TypedDict, Tuple, Annotated
+from typing import List, Dict, TypedDict, Tuple, Annotated, Optional
 from pydantic import BaseModel, Field
 import operator
 
@@ -25,6 +25,7 @@ class StructuredResponse(BaseModel):
     """Schema for structured LLM response with answer and sources."""
     answer: str = Field(description="The formatted answer to the user's question in Markdown")
     source_indices: List[int] = Field(description="List of context indices (1-based) used in the answer")
+    target_office: Optional[str] = Field(description="The specific office name identified (e.g., 'DAO', 'Ward Office', 'Municipality')")
 
 # ------------------------------
 # Global Type Definitions for LangGraph State
@@ -41,6 +42,8 @@ class ChatState(TypedDict):
     answer: str
     sources: List[Dict]
     error: str
+    is_location_query: bool 
+    target_office: Optional[str]
     retrieved_chunk_ids: List[str]
     reranked_chunk_ids: List[str]
     all_retrieved_chunks: List[Tuple]
@@ -140,6 +143,7 @@ def _retrieve_node(state: ChatState, index, dense_embeddings, bm25_encoder: BM25
                    alpha: float, n_retrieval: int, n_generation: int) -> Dict:
     """
     LangGraph node: Finds context based on the query and chat history.
+    Now captures location-based intent.
     """
     try:
         query = state["query"]
@@ -151,6 +155,7 @@ def _retrieve_node(state: ChatState, index, dense_embeddings, bm25_encoder: BM25
             history_str += f"{role}: {msg.content}\n"
 
         # Retrieve relevant context
+        # result now contains processed_info with our new location flags
         result = retriever(
             index, query, dense_embeddings, bm25_encoder,
             chat_history=history_str, 
@@ -161,48 +166,53 @@ def _retrieve_node(state: ChatState, index, dense_embeddings, bm25_encoder: BM25
         )
 
         # Handle different return types
-        # 1. Error return (string or tuple with error)
         if isinstance(result, str) and result.startswith("Error"):
             return {
                 "error": result, 
                 "context": [], 
+                "is_location_query": False,
+                "target_office": None,
                 "retrieved_chunk_ids": [],
                 "reranked_chunk_ids": [],
                 "all_retrieved_chunks": [],
                 "reranked_chunks": []
             }
         
-        # 2. Success return (4-tuple)
         if isinstance(result, tuple) and len(result) == 4:
             context_list, processed_info, all_original_chunks, reranked_chunks = result
         else:
-            # Fallback for unexpected formats
             return {
                 "error": "Unexpected return format from retriever",
                 "context": [],
+                "is_location_query": False,
+                "target_office": None,
                 "retrieved_chunk_ids": [],
                 "reranked_chunk_ids": [],
                 "all_retrieved_chunks": [],
                 "reranked_chunks": []
             }
         
-        # Determine language
+        # Determine language and location intent from processed_info
         response_language = processed_info.get("language", "nepali") if processed_info else "nepali"
         
-        # Extract chunk IDs from original retrieval (for evaluation)
-        all_chunk_ids = [chunk[3] for chunk in all_original_chunks if len(chunk) > 3]
+        # --- NEW LOCATION LOGIC ---
+        is_location_query = processed_info.get("is_location_query", False)
+        target_office = processed_info.get("target_office", None)
         
-        # Extract chunk IDs from reranked chunks (for evaluation)
+        # Extract chunk IDs for evaluation
+        all_chunk_ids = [chunk[3] for chunk in all_original_chunks if len(chunk) > 3]
         reranked_chunk_ids = [chunk[3] for chunk in reranked_chunks if len(chunk) > 3]
             
         return {
             "context": context_list,  
             "response_language": response_language, 
+            "is_location_query": is_location_query,  # Stored in state for 'generate' node
+            "target_office": target_office,          # Stored in state for 'generate' node
             "error": "",
-            "retrieved_chunk_ids": all_chunk_ids,  # Original order
-            "reranked_chunk_ids": reranked_chunk_ids,  # Reranked order
-            "all_retrieved_chunks": all_original_chunks,  # Original chunks
-            "reranked_chunks": reranked_chunks  # Reranked chunks
+            "retrieved_chunk_ids": all_chunk_ids,
+            "reranked_chunk_ids": reranked_chunk_ids,
+            "all_retrieved_chunks": all_original_chunks,
+            "reranked_chunks": reranked_chunks
         }
 
     except Exception as e:
@@ -211,37 +221,71 @@ def _retrieve_node(state: ChatState, index, dense_embeddings, bm25_encoder: BM25
         return {
             "error": f" Error during retrieval: {e}", 
             "context": [], 
+            "is_location_query": False,
+            "target_office": None,
             "retrieved_chunk_ids": [],
             "reranked_chunk_ids": [],
             "all_retrieved_chunks": []
         }
 
 def _generate_node(state: ChatState) -> Dict:
-    """LangGraph node: Generates the final response using the context and history with structured output."""
+    """
+    LangGraph node: Generates the final response.
+    Checks for location intent, handles tokens, and strips them for the UI.
+    """
     try:
         query = state["query"]
         context_list = state["context"]
         chat_history = state["chat_history"]
         response_language = state["response_language"]
         
+        # 1. Check the location flag from the Retriever
+        is_location = state.get("is_location_query", False)
+
         if state.get("error"):
             return {"answer": state["error"], "sources": [], "chat_history": []}
 
-        # Use structured output
+        # Initialize LLM
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash", 
             temperature=0.5,
         ).with_structured_output(StructuredResponse)
 
+        # 2. Modify Prompt based on location flag
         full_prompt = _format_input(query, context_list, chat_history, response_language)
+        
+        if is_location:
+            location_instruction = """
+            \n**CRITICAL INSTRUCTION FOR LOCATION QUERY:**
+            - Identify the office name (e.g., 'District Administration Office', 'Ward Office') and put it ONLY in the `target_office` field.
+            - **DO NOT** include the office name at the beginning of the `answer` text.
+            - The `answer` should start directly with the descriptive information/procedure.
+            """
+            full_prompt += location_instruction
 
-        # Get structured response directly
+        # 3. Invoke LLM
         structured_response: StructuredResponse = llm.invoke(full_prompt)
         
-        clean_answer = structured_response.answer.strip()
+        raw_answer = structured_response.answer.strip()
+        office_name = structured_response.target_office
         source_indices = structured_response.source_indices
 
-        # Build sources list from indices
+        if office_name:
+            is_location = True
+            # FIX: Initialize final_answer here so it's always associated with a value
+            final_answer = raw_answer 
+            
+            if raw_answer.startswith(office_name):
+                final_answer = raw_answer[len(office_name):].lstrip(" ,:-")
+            
+            # Now final_answer is guaranteed to exist
+            final_answer = final_answer.replace("[[START_LOCATION]]", "").strip()
+
+        else:
+            final_answer = raw_answer
+
+
+        # 5. Build sources list
         sources = []
         for idx in source_indices:
             if 1 <= idx <= len(context_list):
@@ -260,12 +304,14 @@ def _generate_node(state: ChatState) -> Dict:
                 seen.add(src_tuple)
                 unique_sources.append(src)
                 
-        new_history_messages = [HumanMessage(content=query), AIMessage(content=clean_answer)]
+        new_history_messages = [HumanMessage(content=query), AIMessage(content=final_answer)]
         
         return {
-            "answer": clean_answer,
+            "answer": final_answer,
             "sources": unique_sources,
             "error": "",
+            "is_location_query": is_location, # Pass it back to state
+            "target_office": office_name,
             "chat_history": new_history_messages 
         }
 
@@ -278,7 +324,6 @@ def _generate_node(state: ChatState) -> Dict:
             "error": f"Generation Error: {e}", 
             "chat_history": []
         }
-
 # ------------------------------
 # LangGraph Builder & Entry Point
 # ------------------------------
@@ -370,6 +415,8 @@ def rag_chat(index, query: str, dense_embeddings, bm25_encoder: BM25Encoder,
         reranked_chunk_ids = final_state.get("reranked_chunk_ids", [])
         all_chunks = final_state.get("all_retrieved_chunks", [])
         reranked_chunks = final_state.get("reranked_chunks", [])
+        is_location_query = final_state.get("is_location_query", False)
+        target_office = final_state.get("target_office", None)
         
         new_messages_from_state = final_state.get("chat_history", [])
         
@@ -379,10 +426,13 @@ def rag_chat(index, query: str, dense_embeddings, bm25_encoder: BM25Encoder,
         return {
             "answer": answer, 
             "sources": sources,
+            "is_location_query": is_location_query, # Now returned to FastAPI
+            "target_office": target_office,
             "retrieved_chunk_ids": retrieved_chunk_ids,  # Original retrieval order
             "reranked_chunk_ids": reranked_chunk_ids,  # Reranked order (used for generation)
             "all_retrieved_chunks": all_chunks,  # Original chunks
-            "reranked_chunks": reranked_chunks  # Reranked chunks
+            "reranked_chunks": reranked_chunks,  # Reranked chunks
+            
         }
 
     except Exception as e:

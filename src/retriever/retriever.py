@@ -106,6 +106,7 @@ class QueryAnalysis(BaseModel):
     rewritten_query: str = Field(description="Standalone, context-aware Nepali query")
     document_type: str = Field(description="Either 'passport' or 'citizenship'")
     tag: str = Field(description="The specific category tag")
+    # target_office: Optional[str] = Field(description="Specific office name if location is requested")
 
 
 
@@ -134,18 +135,23 @@ def process_query_unified(query: str, chat_history: str = "") -> Dict[str, str]:
     
     # --- PROMPT TEXT REMAINS UNCHANGED ---
     prompt_text = f"""
-You are an intelligent assistant for a Nepali government document Q&A system. You must perform THREE tasks in a single response:
+You are an intelligent assistant for a Nepali government document Q&A system. You must perform FOUR tasks in a single response:
 
 {history_section}
 
-**TASK 1: LANGUAGE DETECTION & TRANSLATION**
+**TASK 1: LOCATION DETECTION (CRITICAL)**
+If the user is asking "Where to go?", "Where is the office?", or seeking an address (कहाँ जाने?, ठेगाना कहाँ छ?):
+- You MUST start your entire response with the token: [[LOCATION_TRUE]]
+- Otherwise, do NOT include any token.
+
+**TASK 2: LANGUAGE DETECTION & TRANSLATION**
 - Detect if the user query is in English or Nepali
 - Set language field to either 'english' or 'nepali' based on the original query
 - If English: Translate it to proper Nepali question suitable for query (natural, accurate translation)
 - If Nepali: Keep it as is (translated_query will be empty string)
 - If question is vague or unclear, try query expansion by expanding the question yourself (but striclty when necessary).
 
-**TASK 2: QUERY REWRITING**
+**TASK 3: QUERY REWRITING**
 - Use the translated query (if English) or original query (if Nepali)
 - If there is conversation history and the query refers to previous context (using pronouns), replace them with specific entities from the history
 - Make the query standalone and self-contained for semantic search
@@ -153,7 +159,7 @@ You are an intelligent assistant for a Nepali government document Q&A system. Yo
 - If query is already standalone, return it as-is
 - DO NOT answer the question - only rewrite it
 
-**TASK 3: CATEGORIZATION**
+**TASK 4: CATEGORIZATION**
 Classify the rewritten query into:
 1. document_type: Either 'passport' or 'citizenship'
 2. tag: EXACTLY ONE category tag (in English) that best represents the query's intent
@@ -186,19 +192,29 @@ Classify the rewritten query into:
 
 **USER QUERY:** {{query}}
 
-**OUTPUT (JSON only):**
+**OUTPUT (Start with [[LOCATION_TRUE]] if applicable, then the JSON):**
 """
     
     prompt = PromptTemplate(input_variables=["query"], template=prompt_text)
     chain = LLM(prompt, temperature=0.0)
     response = chain.invoke({"query": query})
+
+    raw_content = response.content.strip()
+    is_location_query = False
+
+    if raw_content.startswith("[[LOCATION_TRUE]]"):
+        is_location_query = True
+        # Remove the token to make it valid JSON for the parser
+        raw_content = raw_content.replace("[[LOCATION_TRUE]]", "").strip()
+        print("🚩 Location Token Detected!")
     
     try:
         # 3. Parse the output (parser.parse takes the string from response.content)
-        parsed_obj = parser.parse(response.content)
+        parsed_obj = parser.parse(raw_content)
         
         # Convert Pydantic object back to the dictionary your code expects
         parsed = parsed_obj.dict()
+        parsed['is_location_query'] = is_location_query
         
         print(f"\nOriginal Query: {parsed['original_query']}")
         print(f"Language: {parsed['language']}")
@@ -387,6 +403,7 @@ def retriever(index, query: str, dense_embeddings, bm25_encoder: BM25Encoder,
         rewritten_query = processed["rewritten_query"]
         doc_type = processed["document_type"]
         tag = processed["tag"]
+
 
         # Step 2: Search - retrieve top n_retrieval chunks
         search_results = hybrid_search(

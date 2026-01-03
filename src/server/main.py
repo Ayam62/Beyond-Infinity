@@ -11,6 +11,10 @@ from pinecone_text.sparse import BM25Encoder
 from langchain_huggingface import HuggingFaceEmbeddings
 from pydub import AudioSegment
 
+# Geospatial Imports
+from geopy.geocoders import Nominatim
+from geopy.distance import geodesic
+
 # Import your custom modules
 from generator.generator import rag_chat, clear_chat_history
 from retriever.retriever import initialize_reranker
@@ -36,6 +40,7 @@ print("🚀 Initializing API and Loading Models...")
 INDEX_NAME = "nepali-docs-hybrid"
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(INDEX_NAME)
+print("1")
 
 # 2. Load Dense Embeddings
 model_kwargs = {'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
@@ -45,155 +50,158 @@ dense_embeddings = HuggingFaceEmbeddings(
     model_kwargs=model_kwargs,
     encode_kwargs=encode_kwargs
 )
+print("2")
 
 # 3. Load BM25 Encoder
 bm25_encoder = BM25Encoder()
 bm25_path = os.path.join(BASE_DIR, "../embeddings/bm25_params.json")
 if os.path.exists(bm25_path):
     bm25_encoder.load(bm25_path)
+print("3")
 
 # 4. Pre-load Reranker
 initialize_reranker()
+print("5")
+
+# 5. Initialize Geolocator (OpenStreetMap)
+geolocator = Nominatim(user_agent="sahaj_nepal_locator")
 
 # ============================================
 # STT Helper Function
 # ============================================
 
 def transcribe_audio(audio_file_path: str):
-    """
-    Transcribes audio to text with auto-detection for Nepali and English.
-    """
     if not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
-        print("❌ Azure credentials missing")
         return None
-
     speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
     audio_config = speechsdk.audio.AudioConfig(filename=audio_file_path)
-
-    # Auto-detect language between Nepali and English
-    auto_detect_source_language_config = speechsdk.languageconfig.AutoDetectSourceLanguageConfig(
-        languages=["ne-NP", "en-US"]
-    )
-
-    speech_recognizer = speechsdk.SpeechRecognizer(
-        speech_config=speech_config, 
-        auto_detect_source_language_config=auto_detect_source_language_config, 
-        audio_config=audio_config
-    )
-
+    auto_detect_source_language_config = speechsdk.languageconfig.AutoDetectSourceLanguageConfig(languages=["ne-NP", "en-US"])
+    speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, auto_detect_source_language_config=auto_detect_source_language_config, audio_config=audio_config)
     result = speech_recognizer.recognize_once_async().get()
-
     if result.reason == speechsdk.ResultReason.RecognizedSpeech:
         return result.text
-    elif result.reason == speechsdk.ResultReason.NoMatch:
-        print("No speech could be recognized")
-        return None
-    else:
-        return None
+    return None
 
 # ============================================
-# FastAPI App & Models
+# FastAPI Models
 # ============================================
-
-app = FastAPI(title="Sahaj Conversational API", version="1.3")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 class SourceInfo(BaseModel):
     source_link: str
     source_type: str
 
+class NearestOfficeInfo(BaseModel):
+    name: str
+    address: str
+    latitude: float
+    longitude: float
+    distance_km: float
+
 class ChatResponse(BaseModel):
     reply: str
     sources: List[SourceInfo]
+    is_location_query: bool = False
+    target_office: Optional[str] = None
+    nearest_office: Optional[NearestOfficeInfo] = None
 
 class ChatRequest(BaseModel):
     message: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
+# ============================================
+# Geospatial Logic
+# ============================================
+
+def find_nearest_location(office_name: str, user_lat: float, user_lon: float):
+    try:
+        search_query = f"{office_name}, Nepal"
+        locations = geolocator.geocode(search_query, exactly_one=False, limit=5)
+        if not locations:
+            return None
+        user_coords = (user_lat, user_lon)
+        best_match = None
+        min_dist = float('inf')
+        for loc in locations:
+            loc_coords = (loc.latitude, loc.longitude)
+            dist = geodesic(user_coords, loc_coords).kilometers
+            if dist < min_dist:
+                min_dist = dist
+                best_match = {
+                    "name": office_name,
+                    "address": loc.address,
+                    "latitude": loc.latitude,
+                    "longitude": loc.longitude,
+                    "distance_km": round(dist, 2)
+                }
+        return best_match
+    except Exception as e:
+        print(f"🌍 Geocoding Error: {e}")
+        return None
 
 # ============================================
 # Core RAG Logic
 # ============================================
 
-def process_rag_request(query: str):
-    """ Helper for RAG logic """
+def process_rag_request(query: str, lat: float = None, lon: float = None):
     try:
         result = rag_chat(
-            index=index,
-            query=query,
-            dense_embeddings=dense_embeddings,
-            bm25_encoder=bm25_encoder,
-            alpha=0.5, 
-            n_retrieval=7,
-            n_generation=3
+            index=index, query=query, dense_embeddings=dense_embeddings,
+            bm25_encoder=bm25_encoder, alpha=0.5, n_retrieval=7, n_generation=3
         )
+        answer = result.get("answer", "माफ गर्नुहोस्, केही समस्या आयो।")
+        is_loc = result.get("is_location_query", False)
+        office = result.get("target_office")
+        
+        nearest_data = None
+        if is_loc and office and lat is not None and lon is not None:
+            nearest_data = find_nearest_location(office, lat, lon)
+            # We don't append the address to the string anymore because we will show the map
+            if nearest_data:
+                answer += f"\n\n📍 तपाईंको नजिकको कार्यालय तलको नक्सामा हेर्नुहोस्:"
+
         return {
-            "reply": result.get("answer", "माफ गर्नुहोस्, केही समस्या आयो।"),
+            "reply": answer,
             "sources": result.get("sources", []),
+            "is_location_query": is_loc,
+            "target_office": office,
+            "nearest_office": nearest_data
         }
     except Exception as e:
         print(f"❌ RAG Error: {e}")
-        return {"reply": "माफ गर्नुहोस्, केही समस्या आयो।", "sources": []}
+        return {"reply": "माफ गर्नुहोस्, केही समस्या आयो।", "sources": [], "is_location_query": False}
 
 # ============================================
 # Endpoints
 # ============================================
 
+app = FastAPI(title="Sahaj Conversational API", version="1.4")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
 @app.post("/transcribe")
 async def transcribe_only(file: UploadFile = File(...)):
-    """
-    Step 1: Convert audio to text so the user can edit it in the frontend.
-    """
-    raw_path = f"raw_transcribe_{file.filename}"
-    wav_path = f"fixed_{file.filename}.wav"
-    
-    with open(raw_path, "wb") as buffer:
-        buffer.write(await file.read())
-
+    raw_path, wav_path = f"raw_{file.filename}", f"fixed_{file.filename}.wav"
+    with open(raw_path, "wb") as buffer: buffer.write(await file.read())
     try:
-        # Fix header for Azure (Converts WebM/Ogg to WAV)
         audio = AudioSegment.from_file(raw_path)
         audio.export(wav_path, format="wav")
-
         text = transcribe_audio(wav_path)
         return {"transcribed_text": text or ""}
-    
     except Exception as e:
-        print(f"Transcription error: {e}")
         return {"transcribed_text": ""}
-    
     finally:
         for p in [raw_path, wav_path]:
-            if os.path.exists(p):
-                os.remove(p)
+            if os.path.exists(p): os.remove(p)
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
-    """
-    Step 2: Process the text query via RAG.
-    """
-    query = request.message.strip()
-    result = process_rag_request(query)
-    return result
+    return process_rag_request(request.message.strip(), request.latitude, request.longitude)
 
 @app.post("/clear-history")
 def clear_history():
-    try:
-        clear_chat_history()
-        return {"message": "Chat history cleared successfully!"}
-    except Exception as e:
-        print(f"❌ Error clearing history: {e}")
-        return {"message": "⚠️ Error clearing history."}
+    clear_chat_history()
+    return {"message": "Success"}
 
 @app.get("/health")
 def health_check():
-    return {
-        "status": "healthy",
-        "gpu_available": torch.cuda.is_available(),
-        "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
-    }
+    return {"status": "healthy"}
