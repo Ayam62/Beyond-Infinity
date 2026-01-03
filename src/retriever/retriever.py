@@ -1,9 +1,10 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
-from langchain.output_parsers import StructuredOutputParser, ResponseSchema
+from langchain_core.output_parsers import PydanticOutputParser  # Modern replacement
+from pydantic import BaseModel, Field                       # Standard for data validation
+from typing import List, Dict, Tuple, Optional
 from pinecone import Pinecone
 from pinecone_text.sparse import BM25Encoder
-from typing import List, Dict, Tuple
 import json
 import re
 import os
@@ -16,14 +17,13 @@ reranker_model = None
 reranker_tokenizer = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def initialize_reranker():
-    """Initialize the BGE reranker model"""
     global reranker_model, reranker_tokenizer
     if reranker_model is None:
         print("Loading reranker model...")
         reranker_tokenizer = AutoTokenizer.from_pretrained('jinaai/jina-reranker-v2-base-multilingual')
         reranker_model = AutoModelForSequenceClassification.from_pretrained(
             'jinaai/jina-reranker-v2-base-multilingual',
-            torch_dtype="auto",
+            dtype="auto", # Changed from torch_dtype to dtype
             trust_remote_code=True,
         )
         reranker_model.to(device)
@@ -98,6 +98,17 @@ def to_nepali_numeral(number: str) -> str:
     eng_to_nep = str.maketrans("0123456789", "०१२३४५६७८९")
     return str(number).translate(eng_to_nep)
 
+
+class QueryAnalysis(BaseModel):
+    original_query: str = Field(description="The original user query")
+    language: str = Field(description="The language of the query (english/nepali)")
+    translated_query: str = Field(description="Nepali translation if English, else empty")
+    rewritten_query: str = Field(description="Standalone, context-aware Nepali query")
+    document_type: str = Field(description="Either 'passport' or 'citizenship'")
+    tag: str = Field(description="The specific category tag")
+
+
+
 def process_query_unified(query: str, chat_history: str = "") -> Dict[str, str]:
     """
     Unified LLM call that handles:
@@ -106,16 +117,10 @@ def process_query_unified(query: str, chat_history: str = "") -> Dict[str, str]:
     3. Query categorization (document_type and tag)
     """
     
-    response_schemas = [
-        ResponseSchema(name="original_query", description="The original user query as provided"),
-        ResponseSchema(name="language", description="Either 'english' or 'nepali' - the language of the original query"),
-        ResponseSchema(name="translated_query", description="Nepali translation if query was English, otherwise empty string"),
-        ResponseSchema(name="rewritten_query", description="Standalone, context-aware query in Nepali suitable for vector search"),
-        ResponseSchema(name="document_type", description="Either 'passport' or 'citizenship'"),
-        ResponseSchema(name="tag", description="One of the relevant category tags")
-    ]
+    # 2. Initialize the Pydantic parser
+    parser = PydanticOutputParser(pydantic_object=QueryAnalysis)
     
-    parser = StructuredOutputParser.from_response_schemas(response_schemas)
+    # This generates the same instructions the prompt expects
     format_instructions = parser.get_format_instructions().replace("{", "{{").replace("}", "}}")
     
     history_section = ""
@@ -127,6 +132,7 @@ def process_query_unified(query: str, chat_history: str = "") -> Dict[str, str]:
 ---
 """
     
+    # --- PROMPT TEXT REMAINS UNCHANGED ---
     prompt_text = f"""
 You are an intelligent assistant for a Nepali government document Q&A system. You must perform THREE tasks in a single response:
 
@@ -188,7 +194,11 @@ Classify the rewritten query into:
     response = chain.invoke({"query": query})
     
     try:
-        parsed = parser.parse(response.content)
+        # 3. Parse the output (parser.parse takes the string from response.content)
+        parsed_obj = parser.parse(response.content)
+        
+        # Convert Pydantic object back to the dictionary your code expects
+        parsed = parsed_obj.dict()
         
         print(f"\nOriginal Query: {parsed['original_query']}")
         print(f"Language: {parsed['language']}")
@@ -198,20 +208,14 @@ Classify the rewritten query into:
         print(f"Document Type: {parsed['document_type']}")
         print(f"Category Tag: {parsed['tag']}\n")
         
-        return {
-            "original_query": parsed["original_query"],
-            "language": parsed.get("language", "nepali"),
-            "translated_query": parsed.get("translated_query", ""),
-            "rewritten_query": parsed["rewritten_query"],
-            "document_type": parsed["document_type"],
-            "tag": parsed["tag"]
-        }
+        return parsed
         
     except Exception as e:
         print(f"Error parsing unified LLM output: {e}")
         print(f"Raw response: {response.content}")
         return None
-    
+
+
 def hybrid_scale(dense, sparse, alpha: float):
     if alpha < 0 or alpha > 1:
         raise ValueError("Alpha must be between 0 and 1")
@@ -495,4 +499,4 @@ def retriever(index, query: str, dense_embeddings, bm25_encoder: BM25Encoder,
         print(f" Error in retriever: {e}")
         import traceback
         traceback.print_exc()
-        return (f"Error: {e}", None, [], [])
+        return ([], None, [], []) # Return an empty list, not an error string
