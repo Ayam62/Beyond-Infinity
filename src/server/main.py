@@ -18,6 +18,13 @@ from geopy.distance import geodesic
 # Import your custom modules
 from generator.generator import rag_chat, clear_chat_history
 from retriever.retriever import initialize_reranker
+import torch
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
 # ============================================
 # STARTUP: Configuration & Model Loading
@@ -26,11 +33,11 @@ from retriever.retriever import initialize_reranker
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(dotenv_path=os.path.join(BASE_DIR, "../.env"))
 
+
 # Azure Speech Config
 AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY")
 AZURE_SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION")
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 if not PINECONE_API_KEY:
     raise ValueError("Please set the PINECONE_API_KEY in your .env file!")
 

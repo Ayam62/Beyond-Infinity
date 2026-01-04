@@ -19,7 +19,7 @@ export default function ChatPage() {
   const [messages, setMessages] = useState([
     {
       id: 1,
-      text: "नमस्ते! **सहज** मा स्वागत छ। म तपाईंलाई सरकारी कागजात प्रक्रियाहरूमा मद्दत गर्न यहाँ छु। तपाईं नेपाली वा अंग्रेजीमा प्रश्न सोध्न सक्नुहुन्छ।\n\nWelcome! I'm here to help you with government document procedures. You can ask in Nepali or English.",
+      text: "नमस्ते! **सहज** मा स्वागत छ। म तपाईंलाई सरकारी कागजात प्रक्रियाहरूमा मद्दत गर्ने छु। तपाईं नेपाली वा अंग्रेजीमा प्रश्न सोध्न सक्नुहुन्छ।\n\nWelcome! I'm here to help you with government document procedures. You can ask in Nepali or English.",
       sender: 'bot',
       timestamp: new Date(),
       sources: [],
@@ -231,7 +231,7 @@ export default function ChatPage() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-gray-900 tracking-tight">सहज</h1>
-              <p className="text-xs text-gray-600 font-medium">सरकारी कागजात सहायक</p>
+              <p className="text-xs text-gray-600 font-medium">सरकारी कागजको साथी</p>
             </div>
           </button>
           <div className="flex items-center gap-3">
@@ -314,15 +314,28 @@ export default function ChatPage() {
                     "आफ्नो प्रश्न लेख्नुहोस् / Ask your question..."
                   }
                   disabled={isLoading || isRecording || isTranscribing}
-                  className="w-full pl-4 pr-12 py-3 rounded-lg border-2 border-gray-200 focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-none bg-white text-gray-900 text-sm disabled:opacity-50"
+                  className="w-full pl-4 pr-24 py-3 rounded-lg border-2 border-gray-200 focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-none bg-white text-gray-900 text-sm disabled:opacity-50"
                   style={{ minHeight: '48px', maxHeight: '160px', height: '48px', overflow: 'hidden' }}
                 />
                 
                 {isTranscribing && (
-                  <div className="absolute right-14 bottom-3">
+                  <div className="absolute right-24 bottom-3">
                     <Loader2 className="w-4 h-4 text-emerald-600 animate-spin" />
                   </div>
                 )}
+
+                <button
+                    onClick={isRecording ? stopRecording : startRecording}
+                    disabled={isLoading || isTranscribing}
+                    className={`absolute bottom-1.5 right-11 p-2 rounded-md transition-all duration-300 ${
+                        isRecording 
+                        ? 'bg-red-500 text-white animate-pulse' 
+                        : 'text-emerald-700 hover:bg-emerald-50 disabled:opacity-30'
+                    }`}
+                    title={isRecording ? "Stop Recording" : "Start Voice Input"}
+                >
+                    {isRecording ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                </button>
 
                 <button
                   onClick={() => handleSendMessage()}
@@ -332,19 +345,6 @@ export default function ChatPage() {
                   <Send className="w-4 h-4" />
                 </button>
             </div>
-
-            <button
-                onClick={isRecording ? stopRecording : startRecording}
-                disabled={isLoading || isTranscribing}
-                className={`p-3 rounded-full transition-all duration-300 ${
-                    isRecording 
-                    ? 'bg-red-500 text-white animate-pulse' 
-                    : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200 disabled:opacity-30'
-                }`}
-                title={isRecording ? "Stop Recording" : "Start Voice Input"}
-            >
-                {isRecording ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-            </button>
           </div>
           <p className="text-xs text-gray-500 mt-2 text-center font-medium">
             {isRecording ? "Automatic stop after 2s of silence" : "Use the mic to speak in Nepali or English"}

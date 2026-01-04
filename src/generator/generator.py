@@ -104,6 +104,7 @@ def _format_input(query: str, context_list: List[Dict], chat_history: List[BaseM
    - English: "Sorry, I don't have information about that."
 5. Never mention context IDs, numbers, or metadata in your answer
 6. Keep the answer complete and relevant to the question only.
+7. Keep the answer short, clear, and concise. Avoid unnecessary details.
 
 **CRITICAL MARKDOWN FORMATTING RULES:**
 
